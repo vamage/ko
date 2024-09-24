@@ -24,6 +24,7 @@ import (
 	gb "go/build"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -935,6 +936,14 @@ func (g *gobuild) buildOne(ctx context.Context, refStr string, base v1.Image, pl
 
 	ref := newRef(refStr)
 
+	digest, err := base.Digest()
+	if err != nil {
+		return nil, err
+	}
+	annotations := map[string]string{}
+	annotations[specsv1.AnnotationBaseImageName] = "fooloncool"
+	annotations[specsv1.AnnotationBaseImageDigest] = digest.String()
+
 	// Layers should be typed to match the underlying image, since some
 	// registries reject mixed-type layers.
 	var layerMediaType types.MediaType
@@ -1160,20 +1169,30 @@ func (g *gobuild) buildOne(ctx context.Context, refStr string, base v1.Image, pl
 	if cfg.Config.Labels == nil {
 		cfg.Config.Labels = map[string]string{}
 	}
+
 	for k, v := range g.labels {
 		cfg.Config.Labels[k] = v
 	}
-
 	empty := v1.Time{}
 	if g.creationTime != empty {
 		cfg.Created = g.creationTime
 	}
-
 	image, err := mutate.ConfigFile(withApp, cfg)
 	if err != nil {
 		return nil, err
 	}
 
+	man, err := image.Manifest()
+	if err != nil {
+		return nil, err
+	}
+	d := map[string]string{}
+	for i, _ := range man.Annotations {
+		d[i] = ""
+	}
+
+	maps.Copy(d, annotations)
+	image = mutate.Annotations(image, d).(v1.Image)
 	si := signed.Image(image)
 
 	if g.sbom != nil {
@@ -1249,22 +1268,6 @@ func (g *gobuild) Build(ctx context.Context, s string) (Result, error) {
 		return nil, err
 	}
 
-	// Annotate the base image we pass to the build function with
-	// annotations indicating the digest (and possibly tag) of the
-	// base image.  This will be inherited by the image produced.
-	if mt != types.DockerManifestList {
-		baseDigest, err := base.Digest()
-		if err != nil {
-			return nil, err
-		}
-
-		anns := map[string]string{
-			specsv1.AnnotationBaseImageDigest: baseDigest.String(),
-			specsv1.AnnotationBaseImageName:   baseRef.Name(),
-		}
-		base = mutate.Annotations(base, anns).(Result)
-	}
-
 	switch mt {
 	case types.OCIImageIndex, types.DockerManifestList:
 		baseIndex, ok := base.(v1.ImageIndex)
@@ -1288,6 +1291,15 @@ func (g *gobuild) buildAll(ctx context.Context, ref string, baseRef name.Referen
 	if err != nil {
 		return nil, err
 	}
+
+	digest, err := baseIndex.Digest()
+	if err != nil {
+		return nil, err
+	}
+	//Deleting inherited annotations
+	annotations := map[string]string{}
+	annotations[specsv1.AnnotationBaseImageName] = baseRef.Name()
+	annotations[specsv1.AnnotationBaseImageDigest] = digest.String()
 
 	matches := make([]v1.Descriptor, 0)
 	for _, desc := range im.Manifests {
@@ -1382,7 +1394,7 @@ func (g *gobuild) buildAll(ctx context.Context, ref string, baseRef name.Referen
 	idx := ocimutate.AppendManifests(
 		mutate.Annotations(
 			mutate.IndexMediaType(empty.Index, baseType),
-			im.Annotations).(v1.ImageIndex),
+			annotations).(v1.ImageIndex),
 		adds...)
 
 	if g.sbom != nil {
